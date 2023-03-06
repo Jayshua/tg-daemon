@@ -1,0 +1,3 @@
+ls      List contents of the test directory
+host    Upload a file to make publicly available on the internet
+source  Download the contents of a URL as a file and send it
