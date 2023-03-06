@@ -192,7 +192,7 @@ async fn poll_telegram(args: Args) {
 					if let Some(message) = unsent_message {
 						info!(chat_id, "Spawning new handler process");
 						let (sender, receiver) = tokio::sync::mpsc::channel(25);
-						sender.send(message).await.unwrap(); // A brand new sender will always successfully send
+						sender.send(message).await.expect("A new sender should never fail");
 						chat_handlers.insert(chat_id, sender);
 						tokio::spawn(chat_handler(tg.clone(), args.clone(), chat_id, receiver));
 					}
@@ -595,7 +595,7 @@ async fn download_file(tg: TgClient, chat_id: u64, file_id: &str) -> Result<std:
 	let mut file = tokio::fs::File::create(&temp_file_path).await?;
 	while let Some(chunk) = response.chunk().await? {
 		debug!("Writing file chunk to temp file");
-		file.write(&chunk).await.unwrap();
+		file.write(&chunk).await?;
 	}
 
 	Ok(temp_file_path)
@@ -790,9 +790,9 @@ struct TelegramError(String);
 impl<Data> TelegramResponse<Data> {
 	fn to_result(self) -> Result<Data, TelegramError> {
 		if self.ok {
-			Ok(self.result.unwrap())
+			Ok(self.result.expect("Ok telegram responses should have results"))
 		} else {
-			Err(TelegramError(self.description.unwrap()))
+			Err(TelegramError(self.description.expect("Error telegram responses should have descriptions")))
 		}
 	}
 }
