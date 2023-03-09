@@ -1,0 +1,8 @@
+colorize  Apply a blue overlay to a photo
+math      Do some math
+ascii     Convert text into ASCII hex
+dl        Download a file from the internet
+mc        Check the status of a minecraft server
+dps       Report any running docker containers
+anime     Report the soonest upcoming anime
+hello     Greeting!

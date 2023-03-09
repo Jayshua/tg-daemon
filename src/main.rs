@@ -30,14 +30,14 @@ struct Args {
 	bot_id: String,
 
 
-	/// Enable/disable chat message upon handler failure
+	/// Suppress chat message upon handler failure
 	///
 	/// By default, the daemon will send a notification error message to the telegram chat
 	/// if the handler process terminates with a non-zero status code.
 	/// Setting this to false will cause the daemon to not send a message if the handler process
 	/// terminates with a non-zero status code.
-	#[arg(long, default_value = "true")]
-	handler_errors: bool,
+	#[arg(long)]
+	suppress_handler_error: bool,
 
 
 	/// Base URL to access the Telegram API at.
@@ -58,7 +58,7 @@ struct Args {
 	/// via environment arguments. This flag will cause the first message to be passed to the process via stdin,
 	/// in the same way subsequent arguments would.
 	#[arg(long)]
-	disable_args: bool,
+	pipe_first_message: bool,
 
 
 	/// File containing commands supported by the bot.
@@ -103,9 +103,7 @@ impl TgClient {
 async fn main() {
 	let args = Args::parse();
 
-	let tracing_subscriber = tracing_subscriber::FmtSubscriber::builder()
-		.with_max_level(tracing::Level::DEBUG)
-		.finish();
+	let tracing_subscriber = tracing_subscriber::FmtSubscriber::builder().finish();
 
 	tracing::subscriber::set_global_default(tracing_subscriber).expect("Setting the tracing subscriber should not fail");
 
@@ -229,7 +227,7 @@ enum HandleError {
 #[tracing::instrument(skip(tg, config, receiver))]
 async fn chat_handler(tg: TgClient, config: Args, chat_id: u64, mut receiver: tokio::sync::mpsc::Receiver<Message>) {
 	let args: Vec<String> =
-		if !config.disable_args {
+		if !config.pipe_first_message {
 			let first_message = receiver.recv().await.expect("sender should not be dropped until chat_handler terminates");
 			message_to_args(&first_message, true).await
 		} else {
@@ -369,6 +367,12 @@ async fn chat_handler(tg: TgClient, config: Args, chat_id: u64, mut receiver: to
 
 		Ok(exit_status) => {
 			error!(?exit_status, "Handler process terminated abnormally");
+
+			if !config.suppress_handler_error {
+				if let Err(reason) = send_message(tg, chat_id, "Fatal Server Error").await {
+					error!(?reason, "Error sending crash notification to telegram client");
+				}
+			}
 		}
 
 		Err(reason) => {
@@ -429,7 +433,7 @@ async fn message_to_args(message: &Message, split_text_args: bool) -> Vec<String
 		}
 
 		Message { photo: Some(photo_sizes), .. } => {
-			let mut args = vec!["//tg-photos".to_string()];
+			let mut args = vec!["//tg-photo".to_string()];
 
 			let photo_sizes = &mut &photo_sizes[..];
 			while let Some(photo_size) = photo_sizes.take_first() {

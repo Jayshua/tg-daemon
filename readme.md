@@ -1,0 +1,3 @@
+A caution: The handler script doesn't *have* to be insecure, but it is very, very easy to write it in an insecure way. For example, interpolating user input into a command like this: `curl https://example.com/$2` could easily be turned into a remote code execution vulnerability.
+
+I recommend only using this daemon for PERSONAL scripts, and checking the CHAT_ID environment variable to guarantee your bot is talking to you, and not somebody else.
