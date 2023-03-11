@@ -30,6 +30,14 @@ struct Args {
 	bot_id: String,
 
 
+	/// One or more chat ids to restrict connections to
+	///
+	/// You'll probably need to run the daemon without this at least once to
+	/// figure out the id of the chat you want to use here
+	#[arg(long)]
+	chat_id: Vec<u64>,
+
+
 	/// Suppress chat message upon handler failure
 	///
 	/// By default, the daemon will send a notification error message to the telegram chat
@@ -174,6 +182,11 @@ async fn poll_telegram(args: Args) {
 					next_update_id = std::cmp::max(next_update_id, update.update_id + 1);
 
 					let chat_id = update.message.chat.id;
+
+					if args.chat_id.len() > 0 && !args.chat_id.contains(&chat_id) {
+						warn!(chat_id, "Ignoring non-whitelisted chat");
+						continue;
+					}
 
 					info!(chat_id, "Received message from telegram");
 

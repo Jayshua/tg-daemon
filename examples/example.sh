@@ -28,7 +28,6 @@ set -e
 case $1 in
 	# Greet the user with a truly stylish and elegant phrase
 	'/hello')
-		aslkdfj --first --second
 		echo "Hello, World!"
 		;;
 
