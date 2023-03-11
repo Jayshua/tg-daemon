@@ -3,11 +3,9 @@
 
 # This is an example script for the Fish shell. There is also a Bash example in this folder.
 #
-# Be aware that each example makes use of programs that you might not have installed
-# like jq or the docker CLI.
-#
-# Even if you don't have the programs required by one of the commands, other commands that
-# you do have the programs for will work.
+# Be aware that each example makes use of programs that you might not have
+# installed like jq or the docker CLI. Even if you don't have the programs
+# required by one of the commands, other commands may work for you.
 #
 # The "/math" and "/hello" commands only use Fish built-in programs, so those should always work.
 #
@@ -15,7 +13,7 @@
 #    tg-daemon --execute example.fish --commands-file commands.txt --bot-id <bot-id>
 
 
-# This will halt execution if you don't have a required program installed
+# Immediately halts execution if you don't have a required program installed
 function fish_command_not_found
 	exit 1
 end
@@ -33,6 +31,11 @@ switch $argv[1]
 		echo "//send"
 		read equation
 		echo (math "$equation")
+
+
+	# Report the status of any running docker containers
+	case "/dps"
+		docker ps --format json | jq '[.State, .Names] | @tsv' -r
 
 
 	# Get the air date and cover photo of the soonest upcoming anime from AniList
@@ -56,28 +59,42 @@ switch $argv[1]
 
 	# Add a blue color overlay to an image using ImageMagick
 	case "/colorize"
-		echo "I'm ready for a picture! (Be sure to upload it as a file, not as a photo.)"
-		echo "//send"
+		set done false
 
-		read --list response
-		argparse -i 'file-id=' 'file-name=' 'mime-type=' -- $response
+		while test $done = 'false'
+			echo "I'm ready for a picture!"
+			echo "//send"
+			read --list response
+			argparse -i 'file-id=' 'file-name=' 'mime-type=' -- $response
 
-		switch $argv[1]
-			case "//tg-document"
-				echo "Receiving photo..."
-				echo "//send"
-				echo "//download-file $_flag_file_id"
-				read _ignore file_path
+			switch $argv[1]
+				case '//tg-document'
+					echo "Receiving photo..."
+					echo "//send"
+					echo "//download-file $_flag_file_id"
+					read _ignore file_path
 
-				echo "Processing photo..."
-				echo "//send"
-				magick $file_path -fill blue -colorize 50% $file_path
+					echo "Processing photo..."
+					echo "//send"
+					magick $file_path -fill blue -colorize 50% $file_path
 
-				echo "//send-photo $file_path"
-				echo "Done!"
+					echo "//send-photo $file_path"
+					echo "Done!"
+					echo "//send"
+					set done true
 
-			case "*"
-				echo "I was expecting a file upload. Please resend the command to try again."
+				case 'stop'
+					echo "Ok!"
+					set done true
+
+				case '//tg-photo'
+					echo 'Oops, you uploaded a photo! Photos are compressed by telegram, for best results please send the picture as a file. (Or send "stop" to stop.)'
+					echo "//send"
+
+				case '*'
+					echo 'I was expecting a file upload, please try again. (Or send "stop" to stop)'
+					echo "//send"
+			end
 		end
 
 
@@ -98,14 +115,13 @@ switch $argv[1]
 		echo "//send"
 
 		read url
-		set url (string trim $url)
 
 		echo "Downloading $url. ✨"
 		echo "//send"
 		echo "//chat-action upload_document"
 
 		set temp_file (mktemp)
-		curl "$url" > $temp_file
+		curl $url > $temp_file
 		echo "//send-file $temp_file"
 
 
@@ -125,11 +141,6 @@ switch $argv[1]
 		# Decode & send the favicon from the base64 in the response
 		echo $server_data | jq .icon -r | cut -c 23- | base64 -d > /tmp/mcicon.png
 		echo "//send-photo /tmp/mcicon.png"
-
-
-	# Report the status of any running docker containers
-	case "/dps"
-		docker ps --format json | jq '[.State, .Names] | @tsv' -r
 
 
 	case "*"
