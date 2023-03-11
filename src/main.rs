@@ -30,10 +30,10 @@ struct Args {
 	bot_id: String,
 
 
-	/// One or more chat ids to restrict connections to
+	/// Whitelist chat ids. Unauthorized chat ids will not spawn a handler process.
 	///
 	/// You'll probably need to run the daemon without this at least once to
-	/// figure out the id of the chat you want to use here
+	/// figure out the id of the chat you want to use here.
 	#[arg(long)]
 	chat_id: Vec<u64>,
 

@@ -32,6 +32,12 @@ case $1 in
 		;;
 
 
+	# Show error for unimplemented command
+	'/math')
+		echo "The /math command is only implemented for the Fish shell example."
+		;;
+
+
 	# Report the status of any running docker containers
 	'/dps')
 		docker ps --format json | jq '[.State, .Names] | @tsv' -r
