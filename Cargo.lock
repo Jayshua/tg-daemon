@@ -83,22 +83,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "daemon_telegram"
-version = "0.1.0"
-dependencies = [
- "clap",
- "derive-enum-from-into",
- "mime",
- "nanoid",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "derive-enum-from-into"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -853,6 +837,22 @@ checksum = "4c9afddd2cec1c0909f06b00ef33f94ab2cc0578c4a610aa208ddfec8aa2b43a"
 dependencies = [
  "rustix",
  "windows-sys",
+]
+
+[[package]]
+name = "tg-daemon"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "derive-enum-from-into",
+ "mime",
+ "nanoid",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -1,10 +1,6 @@
 #![feature(try_blocks, slice_take)]
 
-
-
 mod telegram_api;
-
-
 
 use clap::Parser;
 use tracing::{info, error, debug, warn};
@@ -358,6 +354,8 @@ async fn chat_handler(tg: TgClient, config: Args, chat_id: u64, mut receiver: to
 						let terminator = &line[10..].trim().to_string();
 						debug!(terminator, "Received //heredoc");
 
+						// Loop writing data to message_buffer until the terminator
+						// is found at the start of a line.
 						'heredoc: loop {
 							while let Some(line) = line_iterator.next() {
 								if line.starts_with(terminator) {
@@ -664,7 +662,7 @@ fn test_quote_splitting() {
 /// Collapse multiple leading '/' into a single '/'
 ///
 /// Prevents the client from impersonating the daemon to the handler process
-/// by, e.g., sending `//tg-upload ...`
+/// by, e.g., sending `//tg-document ...`
 ///
 fn safe_text(mut input: &str) -> &str {
 	while input.starts_with("//") {
