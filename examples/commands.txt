@@ -1,8 +1,9 @@
-colorize  Apply a blue overlay to a photo
-math      Do some math
-ascii     Convert text into ASCII hex
-dl        Download a file from the internet
-mc        Check the status of a minecraft server
-dps       Report any running docker containers
-anime     Report the soonest upcoming anime
+search    Do a search
 hello     Greeting!
+dps       Report any running docker containers
+dl        Download a file from the internet
+ascii     Convert text into ASCII hex
+colorize  Apply a blue overlay to a photo
+mc        Check the status of a minecraft server
+anime     Report the soonest upcoming anime
+math      Do some math

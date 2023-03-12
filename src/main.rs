@@ -1,16 +1,42 @@
 #![feature(try_blocks, slice_take)]
 
+
+
+mod telegram_api;
+
+
+
 use clap::Parser;
 use tracing::{info, error, debug, warn};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::collections::HashMap;
+use telegram_api::*;
+
+
+
+
+// Constants
+
 
 
 
 /// Alphabet used to randomly generate the temporary filenames for files downloaded from Telegram
 const FILE_ID_ALPHABET: [char; 62] = [
-	'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v','w','x','y','z','A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z','0','1','2','3','4','5','6','7','8','9'
+	'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v','w','x','y','z',
+	'A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z',
+	'0','1','2','3','4','5','6','7','8','9'
 ];
+
+
+/// How long to poll telegram before closing the HTTP connection and re-opening it
+/// Should be some reasonably large value - Telegram prefers bots don't "refresh" HTTP connections too frequently.
+const TG_TIMEOUT: u64 = 300;
+
+
+
+
+// Types
+
 
 
 
@@ -84,10 +110,12 @@ struct Args {
 
 
 /// Struct to contain context needed for talking to telegram
+///
 /// This data is used by basically every function that needs to talk to telegram,
 /// so it's packaged up into a nice little struct.
+/// Marked public so that tracing can emit the bot_id in log messages.
 #[derive(Debug, Clone)]
-struct TgClient {
+pub struct TgClient {
 	client: reqwest::Client,
 	base_url: String,
 	bot_id: String,
@@ -103,6 +131,40 @@ impl TgClient {
 
 
 
+/// Telegram events that can be sent to the tokio thread that handles a particular chat process
+#[derive(Debug)]
+enum HandleEvent {
+	/// A regular message from the Telegram user
+	Message(Message),
+	/// The Telegram user tapped on an inline keyboard button
+	Callback(CallbackQuery),
+}
+
+
+
+/// Errors that can occur when handling messages to/from a handler process
+#[derive(Debug, derive_enum_from_into::EnumFrom)]
+enum HandleError {
+	UnclosedHeredoc,
+	EditedUnsentMessage,
+	DeletedUnsentMessage,
+	RemovedInlineKeyboardForUnsetMessage,
+	Reqwest(reqwest::Error),
+	Utf8Error(std::str::Utf8Error),
+	TelegramError(TelegramError),
+	IoError(std::io::Error),
+	SendFile(SendFileError),
+	SendMessage(TgRequestError),
+	DownloadFileError(DownloadFileError),
+	InlineButtonExpectedKind,
+	InlineButtonExpectedData,
+	InvalidInlineButtonKind(String),
+}
+
+
+
+
+// Functions
 
 
 
@@ -111,7 +173,9 @@ impl TgClient {
 async fn main() {
 	let args = Args::parse();
 
-	let tracing_subscriber = tracing_subscriber::FmtSubscriber::builder().finish();
+	let tracing_subscriber = tracing_subscriber::FmtSubscriber::builder()
+		.with_env_filter(tracing_subscriber::EnvFilter::from_env("LOG_LEVEL"))
+		.finish();
 
 	tracing::subscriber::set_global_default(tracing_subscriber).expect("Setting the tracing subscriber should not fail");
 
@@ -120,10 +184,8 @@ async fn main() {
 
 
 
-
-
 /// Poll telegram for updates, spawning new processes to handle them as needed
-/// Also update's the bots command list when first started
+/// Will also update the bot's command list when first polled
 #[tracing::instrument(skip_all)]
 async fn poll_telegram(args: Args) {
 	let tg = TgClient {
@@ -143,31 +205,32 @@ async fn poll_telegram(args: Args) {
 	}
 
 
-	let mut chat_handlers: HashMap<u64, tokio::sync::mpsc::Sender<Message>> = HashMap::new();
+	let mut chat_handlers: HashMap<u64, tokio::sync::mpsc::Sender<HandleEvent>> = HashMap::new();
 	let mut poll_failures = 0;
 	let mut next_update_id = 0;
 	let bot_base = tg.bot_base();
-	let timeout = 300;
 	loop {
-		let update_url = format!("{bot_base}/getUpdates?offset={next_update_id}&timeout={timeout}&allowed_updates=[\"message\"]");
-
 		#[derive(Debug, derive_enum_from_into::EnumFrom)]
 		enum GetUpdateError {
 			TelegramError(TelegramError),
 			ReqwestError(reqwest::Error),
 		}
 
-		let result: Result<Vec<UpdateResponse>, GetUpdateError> = try {
-			info!(next_update_id, poll_failures, "Polling telegram");
 
-			tg.client.get(update_url)
-				.timeout(std::time::Duration::from_secs(timeout + 1))
+		let result: Result<Vec<UpdateResponse>, GetUpdateError> = try {
+			debug!(next_update_id, poll_failures, "Polling telegram");
+
+			tg.client
+				.get(format!("{bot_base}/getUpdates?offset={next_update_id}&timeout={TG_TIMEOUT}&allowed_updates=[\"message\",\"callback_query\"]"))
+				.timeout(std::time::Duration::from_secs(TG_TIMEOUT + 1))
 				.send().await?
 				.json::<TelegramResponse<Vec<UpdateResponse>>>().await?
 				.to_result()?
 		};
 
+
 		match result {
+			// Network error contacting telegram, use an exponential backoff to sleep before retrying.
 			Err(reason) => {
 				poll_failures = std::cmp::min(poll_failures + 1, 5);
 				let sleep_duration = u64::pow(2, poll_failures);
@@ -178,32 +241,44 @@ async fn poll_telegram(args: Args) {
 			Ok(updates) => {
 				poll_failures = 0;
 
+				// Telegram can deliver more than one update at a time
 				for update in updates {
 					next_update_id = std::cmp::max(next_update_id, update.update_id + 1);
 
-					let chat_id = update.message.chat.id;
+					let (chat_id, event) = match update {
+						UpdateResponse { message: Some(message), .. } =>
+							(message.chat.id, HandleEvent::Message(message)),
+
+						UpdateResponse { callback_query: Some(callback), .. } =>
+							(callback.message.chat.id, HandleEvent::Callback(callback)),
+
+						_ =>
+							panic!("Telegram promised to always return a message or callback query!"),
+					};
 
 					if args.chat_id.len() > 0 && !args.chat_id.contains(&chat_id) {
 						warn!(chat_id, "Ignoring non-whitelisted chat");
 						continue;
 					}
 
-					info!(chat_id, "Received message from telegram");
+					debug!(chat_id, "Received message from telegram");
 
-					let unsent_message = match chat_handlers.get(&chat_id) {
-						None => Some(update.message),
+					// Careful not to drop a message if the old chat handler crashed or something
+					let unsent_event = match chat_handlers.get(&chat_id) {
+						None => Some(event),
 						Some(sender) => {
-							match sender.send(update.message).await {
+							match sender.send(event).await {
 								Ok(()) => None,
-								Err(tokio::sync::mpsc::error::SendError(message)) => Some(message),
+								Err(tokio::sync::mpsc::error::SendError(event)) => Some(event),
 							}
 						}
 					};
 
-					if let Some(message) = unsent_message {
+					// The handler process either hasn't been created or was terminated
+					if let Some(event) = unsent_event {
 						info!(chat_id, "Spawning new handler process");
 						let (sender, receiver) = tokio::sync::mpsc::channel(25);
-						sender.send(message).await.expect("A new sender should never fail");
+						sender.send(event).await.expect("A new sender should never fail");
 						chat_handlers.insert(chat_id, sender);
 						tokio::spawn(chat_handler(tg.clone(), args.clone(), chat_id, receiver));
 					}
@@ -215,34 +290,15 @@ async fn poll_telegram(args: Args) {
 
 
 
-
-
-
-
-/// Errors that can occur when handling messages to/from a handler process
-#[derive(Debug, derive_enum_from_into::EnumFrom)]
-enum HandleError {
-	UnclosedHeredoc,
-	Reqwest(reqwest::Error),
-	Utf8Error(std::str::Utf8Error),
-	TelegramError(TelegramError),
-	IoError(std::io::Error),
-	SendFile(SendFileError),
-	SendMessage(SendMessageError),
-	SendChatAction(SendChatActionError),
-	DownloadFileError(DownloadFileError),
-}
-
-
 /// Spawn a new handler process for a telegram chat
 /// Will loop processing input from the handler process and messages from the provided receiver until
 /// the handler process terminates or a fatal error is encountered.
 #[tracing::instrument(skip(tg, config, receiver))]
-async fn chat_handler(tg: TgClient, config: Args, chat_id: u64, mut receiver: tokio::sync::mpsc::Receiver<Message>) {
+async fn chat_handler(tg: TgClient, config: Args, chat_id: u64, mut receiver: tokio::sync::mpsc::Receiver<HandleEvent>) {
 	let args: Vec<String> =
 		if !config.pipe_first_message {
 			let first_message = receiver.recv().await.expect("sender should not be dropped until chat_handler terminates");
-			message_to_args(&first_message, true).await
+			event_to_args(&first_message, true).await
 		} else {
 			vec![]
 		};
@@ -267,20 +323,26 @@ async fn chat_handler(tg: TgClient, config: Args, chat_id: u64, mut receiver: to
 	let mut stdin = child.stdin.take().expect("New child process should have stdin");
 	let mut stdout_buffer = [0u8; 1024];
 	let mut message_buffer = String::new();
+	let mut next_message_keyboard = Vec::new();
+	let mut last_message_id = None;
 
 	let process_result: Result<std::process::ExitStatus, HandleError> = try { 'outer: loop {
 		tokio::select! {
+			// Forward messages from telegram to the handler
 			message = receiver.recv() => {
 				let message = message.expect("sender should not drop until chat_handler terminates");
-				let mut args = message_to_args(&message, false).await;
+				let mut args = event_to_args(&message, false).await;
 				args.push("\n".to_string());
 				let args = args.join(" ");
 				stdin.write(args.as_bytes()).await?;
 			}
 
+			// Accept messages from the handler, handling some in the daemon
+			// and forwarding others to Telegram.
 			read_result = stdout.read(&mut stdout_buffer) => {
 				let bytes_read = read_result?;
 
+				// Reading 0 bytes indicates the child process has terminated
 				if bytes_read == 0 {
 					drop(stdin);
 					drop(stdout);
@@ -344,14 +406,69 @@ async fn chat_handler(tg: TgClient, config: Args, chat_id: u64, mut receiver: to
 						stdin.write(format!("//tg-file-download {file_path}\n").as_bytes()).await?;
 					}
 
+					else if line.starts_with("//inline-button") {
+						debug!("Received //inline-button");
+
+						let (kind, line) = split_quoted(line[15..].trim()).ok_or(HandleError::InlineButtonExpectedKind)?;
+						let (data, line) = split_quoted(line).ok_or(HandleError::InlineButtonExpectedData)?;
+
+						let button = match kind.as_str() {
+							"url" => InlineKeyboardButton { text: line.to_string(), variant: InlineKeyboardVariant::Url(data), },
+							"callback" => InlineKeyboardButton { text: line.to_string(), variant: InlineKeyboardVariant::Callback(data), },
+							kind => Err(HandleError::InvalidInlineButtonKind(kind.to_string()))?,
+						};
+
+						next_message_keyboard.push(button);
+					}
+
+					else if line.starts_with("//delete") {
+						delete_message(tg.clone(), chat_id, last_message_id.ok_or(HandleError::DeletedUnsentMessage)?).await?;
+						last_message_id = None;
+					}
+
+					else if line.starts_with("//remove-inline-keyboard") {
+						debug!("Received //remove-inline-keyboard");
+
+						send_message(
+							tg.clone(),
+							chat_id,
+							Some(last_message_id.ok_or(HandleError::RemovedInlineKeyboardForUnsetMessage)?),
+							None::<&str>,
+							&[]
+						)
+						.await?;
+					}
+
+					else if line.starts_with("//edit") {
+						debug!("Received //edit");
+
+						send_message(
+							tg.clone(),
+							chat_id,
+							Some(last_message_id.ok_or(HandleError::EditedUnsentMessage)?),
+							if message_buffer.len() > 0 {
+								Some(&message_buffer)
+							} else {
+								None
+							},
+							&next_message_keyboard
+						)
+						.await?;
+
+						next_message_keyboard.clear();
+						message_buffer.clear();
+					}
+
 					else if line.starts_with("//send") {
 						debug!("Received //send");
 
 						if message_buffer.len() == 0 {
 							warn!("Tried to //send, but the send buffer was empty! Write some content to stdout.");
 						} else {
-							send_message(tg.clone(), chat_id, &message_buffer).await?;
+							let message = send_message(tg.clone(), chat_id, None, Some(&message_buffer), &next_message_keyboard).await?;
 							message_buffer.clear();
+							next_message_keyboard.clear();
+							last_message_id = Some(message.message_id);
 						}
 					}
 
@@ -370,9 +487,9 @@ async fn chat_handler(tg: TgClient, config: Args, chat_id: u64, mut receiver: to
 			info!("Handler process ended successfully");
 
 			if message_buffer.len() > 0 && message_buffer != "\n" {
-				info!("Sending remainder of handler process stdout");
+				debug!("Sending remainder of handler process stdout");
 
-				if let Err(reason) = send_message(tg, chat_id, &message_buffer).await {
+				if let Err(reason) = send_message(tg, chat_id, None, Some(&message_buffer), &next_message_keyboard).await {
 					error!(?reason, "Error sending remainder of handler process stdout");
 				}
 			}
@@ -382,7 +499,7 @@ async fn chat_handler(tg: TgClient, config: Args, chat_id: u64, mut receiver: to
 			error!(?exit_status, "Handler process terminated abnormally");
 
 			if !config.suppress_handler_error {
-				if let Err(reason) = send_message(tg, chat_id, "Fatal Server Error").await {
+				if let Err(reason) = send_message(tg, chat_id, None, Some("Fatal Server Error"), &next_message_keyboard).await {
 					error!(?reason, "Error sending crash notification to telegram client");
 				}
 			}
@@ -396,22 +513,28 @@ async fn chat_handler(tg: TgClient, config: Args, chat_id: u64, mut receiver: to
 
 
 
-/// Convert a Telegram message into a command+args like vec of strings
+/// Convert a Telegram message into a command+args vec of strings
 ///
-/// Like this: //tg-document --file-name photo.jpg --file-id 3klfjl2k3fjl23kj --mime-type image/jpg
-async fn message_to_args(message: &Message, split_text_args: bool) -> Vec<String> {
+/// Returns something like this as a vec of strings:
+///    //tg-document --file-name photo.jpg --file-id 3klfjl2k3fjl23kj --mime-type image/jpg
+///
+async fn event_to_args(message: &HandleEvent, split_text_args: bool) -> Vec<String> {
 	match message {
-		Message { text: Some(text), .. } if split_text_args => {
+		HandleEvent::Callback(CallbackQuery { data, .. }) => {
+			vec!["//tg-callback".to_string(), data.to_string()]
+		}
+
+		HandleEvent::Message(Message { text: Some(text), .. }) if split_text_args => {
 			let text = safe_text(text);
 			text.split_whitespace().map(str::to_string).collect::<Vec<String>>()
 		}
 
-		Message { text: Some(text), .. } => {
+		HandleEvent::Message(Message { text: Some(text), .. }) => {
 			let text = safe_text(text);
 			vec![text.to_string()]
 		}
 
-		Message { document: Some(document), .. } => {
+		HandleEvent::Message(Message { document: Some(document), .. }) => {
 			let mut args = vec![
 				"//tg-document".to_string(),
 				"--file-id".to_string(),
@@ -445,14 +568,15 @@ async fn message_to_args(message: &Message, split_text_args: bool) -> Vec<String
 			args
 		}
 
-		Message { photo: Some(photo_sizes), .. } => {
-			let mut args = vec!["//tg-photo".to_string()];
+		HandleEvent::Message(Message { photo: Some(photo_sizes), .. }) => {
+			let mut photo_sizes: Vec<_> = photo_sizes.to_vec();
+			photo_sizes.sort_by_key(|size| size.width * size.height);
 
-			let photo_sizes = &mut &photo_sizes[..];
-			while let Some(photo_size) = photo_sizes.take_first() {
-				args.push(photo_size.file_id.to_string());
-				args.push(photo_size.width.to_string());
-				args.push(photo_size.height.to_string());
+			let mut args = vec!["//tg-photo".to_string()];
+			for size in photo_sizes {
+				args.push(size.file_id.to_string());
+				args.push(size.width.to_string());
+				args.push(size.height.to_string());
 			}
 
 			args
@@ -467,191 +591,81 @@ async fn message_to_args(message: &Message, split_text_args: bool) -> Vec<String
 
 
 
+/// Get the first space-separated "argument" from a string, returning the rest of the string unchanged.
+///
+/// Handles quotes around arguments containing spaces, and escaping quotes with the backslash character.
+///
+/// Examples:
+///    first second third
+///     => ("first", " second third")
+///
+///    "first wi\"th spaces" second third
+///     => ("first with spaces", " second third")
+///
+/// Note that backslashes and quotes are not included in the returned argument.
+///
+fn split_quoted(string: &str) -> Option<(String, &str)> {
+	let string = string.trim_start();
 
-
-
-
-
-
-
-#[derive(Debug, derive_enum_from_into::EnumFrom)]
-enum SendMessageError {
-	Reqwest(reqwest::Error),
-	TelegramError(TelegramError),
-}
-
-#[tracing::instrument(skip_all)]
-async fn send_message(tg: TgClient, chat_id: u64, message: &str) -> Result<Message, SendMessageError> {
-	let message = tg.client
-		.post(format!(r#"{}/sendMessage"#, tg.bot_base()))
-		.json(&serde_json::json!({
-			"chat_id": chat_id,
-			"text": message
-		}))
-		.send().await?
-		.json::<TelegramResponse<Message>>().await?
-		.to_result()?;
-
-	Ok(message)
-}
-
-
-
-
-
-#[derive(Debug, derive_enum_from_into::EnumFrom)]
-enum SendFileError {
-	FileIo(std::io::Error),
-	Reqwest(reqwest::Error),
-	Telegram(TelegramError),
-}
-
-#[tracing::instrument(skip(tg))]
-async fn send_file(tg: TgClient, chat_id: u64, file_path: impl AsRef<std::path::Path> + std::fmt::Debug) -> Result<Message, SendFileError> {
-	let mut file = tokio::fs::File::open(file_path).await?;
-	let mut file_buffer = Vec::new();
-	file.read_to_end(&mut file_buffer).await?;
-
-	let file_length: u64 = file_buffer.len() as u64;
-
-	let photo_form_part = reqwest::multipart::Part::stream_with_length(file_buffer, file_length).file_name("document");
-	let form = reqwest::multipart::Form::new()
-		.text("chat_id", format!("{}", chat_id))
-		.part("document", photo_form_part);
-
-	let message = tg.client
-		.post(format!("{}/sendDocument", tg.bot_base()))
-		.multipart(form)
-		.send().await?
-		.json::<TelegramResponse<Message>>().await?
-		.to_result()?;
-
-	Ok(message)
-}
-
-
-
-#[tracing::instrument(skip(tg))]
-async fn send_photo(tg: TgClient, chat_id: u64, file_path: impl AsRef<std::path::Path> + std::fmt::Debug) -> Result<Message, SendFileError> {
-	let mut file = tokio::fs::File::open(file_path).await?;
-	let mut file_buffer = Vec::new();
-	file.read_to_end(&mut file_buffer).await?;
-
-	let file_length: u64 = file_buffer.len() as u64;
-
-	let photo_form_part = reqwest::multipart::Part::stream_with_length(file_buffer, file_length).file_name("photo");
-	let form = reqwest::multipart::Form::new()
-		.text("chat_id", format!("{}", chat_id))
-		.part("photo", photo_form_part);
-
-	let message = tg.client
-		.post(format!("{}/sendPhoto", tg.bot_base()))
-		.multipart(form)
-		.send().await?
-		.json::<TelegramResponse<Message>>().await?
-		.to_result()?;
-
-	Ok(message)
-}
-
-
-
-#[derive(Debug, derive_enum_from_into::EnumFrom)]
-enum SendChatActionError {
-	TelegramError(TelegramError),
-	Reqwest(reqwest::Error),
-}
-
-#[tracing::instrument(skip(tg))]
-async fn send_chat_action(tg: TgClient, chat_id: u64, action: &str) -> Result<(), SendChatActionError> {
-	tg.client
-		.post(format!("{}/sendChatAction", tg.bot_base()))
-		.json(&serde_json::json!({
-			"chat_id": chat_id,
-			"action": action,
-		}))
-		.send().await?
-		.json::<TelegramResponse<serde_json::Value>>().await?
-		.to_result()?;
-
-	Ok(())
-}
-
-
-
-
-
-
-
-#[derive(Debug, derive_enum_from_into::EnumFrom)]
-enum DownloadFileError {
-	Reqwest(reqwest::Error),
-	FileIo(std::io::Error),
-	TelegramError(TelegramError),
-	FilePathMissing,
-}
-
-
-#[tracing::instrument(skip(tg))]
-async fn download_file(tg: TgClient, chat_id: u64, file_id: &str) -> Result<std::path::PathBuf, DownloadFileError> {
-	let file = tg.client
-		.post(format!("{}/getFile", tg.bot_base()))
-		.json(&serde_json::json!({"file_id": file_id}))
-		.send().await?
-		.json::<TelegramResponse<File>>().await?
-		.to_result()?;
-
-	let file_path = file.file_path.ok_or(DownloadFileError::FilePathMissing)?;
-
-	let mut response = tg.client
-		.get(format!("{}/file/bot{}/{file_path}", tg.base_url, tg.bot_id))
-		.send().await?;
-
-	let mut temp_file_path = std::env::temp_dir();
-	temp_file_path.push(nanoid::nanoid!(12, &FILE_ID_ALPHABET));
-	let mut file = tokio::fs::File::create(&temp_file_path).await?;
-	while let Some(chunk) = response.chunk().await? {
-		debug!("Writing file chunk to temp file");
-		file.write(&chunk).await?;
+	let mut segment = String::new();
+	let mut is_escaping = false;
+	let mut is_quoting = false;
+	for (index, character) in string.char_indices() {
+		if is_escaping {
+			is_escaping = false;
+			segment.push(character);
+		}
+		else if character == '\\' {
+			is_escaping = true;
+		}
+		else if character == '"' {
+			is_quoting = !is_quoting;
+		}
+		else if character == ' ' && !is_quoting {
+			return Some((segment, &string[index..]));
+		} else {
+			segment.push(character);
+		}
 	}
 
-	Ok(temp_file_path)
+	if segment.len() > 0 {
+		return Some((segment, &string[string.len()..string.len()]));
+	} else {
+		return None;
+	}
+}
+
+/// Tests for the split_quoted function
+#[cfg(test)]
+#[test]
+fn test_quote_splitting() {
+	let valid_cases = &[
+		("first",                                ("first", "")),
+		("    first",                            ("first", "")),
+		("    first   ",                         ("first", "   ")),
+		("first second",                         ("first", " second")),
+		("first second third",                   ("first", " second third")),
+		("first \"second third\"",               ("first", " \"second third\"")),
+		("\"first with spaces\" second",         ("first with spaces", " second")),
+		("    first    second   ",               ("first", "    second   ")),
+		("    first second   ",                  ("first", " second   ")),
+		(r#" "fir\"st with quote" remainder  "#, ("fir\"st with quote", " remainder  ")),
+	];
+
+	assert_eq!(split_quoted(""), None);
+
+	for &(input, (prefix, suffix)) in valid_cases {
+		assert_eq!(split_quoted(input), Some((prefix.to_string(), suffix)));
+	}
 }
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/// Collapse n leading '/' to a single '/'
+/// Collapse multiple leading '/' into a single '/'
 ///
-/// Prevents the client from impersonating the daemon to the handler process by, e.g., sending `//tg-upload ...`
+/// Prevents the client from impersonating the daemon to the handler process
+/// by, e.g., sending `//tg-upload ...`
+///
 fn safe_text(mut input: &str) -> &str {
 	while input.starts_with("//") {
 		input = &input[1..];
@@ -661,155 +675,14 @@ fn safe_text(mut input: &str) -> &str {
 }
 
 
-/// The user-provided file name for document uploads is passed to the handler process
-/// in a --command-arg style. This function cleans the user-provided file name, only
-/// permitting these characters: [a-zA-Z0-9_.-].
+
+/// Make a string safe for including in a space separated list of arguments
+///
+/// Removes all characters that are not [a-zA-Z0-9_.]
+///
 fn clean_file_name(input: &str) -> String {
 	input
 		.chars()
-		.filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+		.filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
 		.collect::<String>()
-}
-
-
-
-
-
-
-
-
-#[derive(Debug, derive_enum_from_into::EnumFrom)]
-enum SetupCommandsError {
-	FileIo(std::io::Error),
-	ReqwestError(reqwest::Error),
-	FileEmpty,
-	InvalidCommandLine(usize),
-	TelegramError(TelegramError),
-}
-
-#[tracing::instrument(skip_all)]
-async fn setup_commands(tg: TgClient, commands_path: &str) -> Result<(), SetupCommandsError> {
-	let mut file = tokio::fs::File::open(commands_path).await?;
-	let mut buffer = String::new();
-	file.read_to_string(&mut buffer).await?;
-
-	let mut commands = Vec::new();
-	for (line_index, line) in buffer.lines().enumerate() {
-		let (command, description) = line.split_once(" ").ok_or(SetupCommandsError::InvalidCommandLine(line_index + 1))?;
-		let (command, description) = (command.trim(), description.trim());
-
-		if command.len() == 0 || description.len() == 0 {
-			return Err(SetupCommandsError::InvalidCommandLine(line_index + 1));
-		}
-
-		commands.push(serde_json::json!({
-			"command": command,
-			"description": description,
-		}));
-	}
-
-	if commands.len() == 0 {
-		return Err(SetupCommandsError::FileEmpty);
-	}
-
-	tg.client
-		.post(format!("{}/setMyCommands", tg.bot_base()))
-		.json(&serde_json::json!({ "commands": commands }))
-		.send().await?
-		.json::<TelegramResponse<bool>>().await?
-		.to_result()?;
-
-	Ok(())
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-#[derive(Debug, serde::Deserialize)]
-struct File {
-	file_path: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct UpdateResponse {
-	update_id: u64,
-	message: Message,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct Message {
-	text: Option<String>,
-	chat: Chat,
-	document: Option<Document>,
-	photo: Option<Vec<PhotoSize>>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct User {
-
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct Document {
-	file_id: String,
-
-	#[serde(rename="file_name")]
-	unsafe_file_name: Option<String>,
-
-	#[serde(rename="mime_type")]
-	unsafe_mime_type: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct PhotoSize {
-	file_id: String,
-	width: u32,
-	height: u32,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct Chat {
-	id: u64,
-}
-
-
-
-
-
-
-
-
-
-/// Success/Failure type returned by all Telegram requests
-///
-/// Telegram always returns JSON of the form { "ok": bool, "result": ...whatever the endpoint returns... }
-/// with an optional "description" field that exists if "ok" is false.
-/// This struct is that.
-#[derive(Debug, serde::Deserialize)]
-struct TelegramResponse<Data> {
-	ok: bool,
-	description: Option<String>,
-	result: Option<Data>,
-}
-
-#[derive(Debug)]
-struct TelegramError(String);
-
-impl<Data> TelegramResponse<Data> {
-	fn to_result(self) -> Result<Data, TelegramError> {
-		if self.ok {
-			Ok(self.result.expect("Ok telegram responses should have results"))
-		} else {
-			Err(TelegramError(self.description.expect("Error telegram responses should have descriptions")))
-		}
-	}
 }

@@ -35,6 +35,7 @@ switch $argv[1]
 
 	# Report the status of any running docker containers
 	case "/dps"
+		echo "Active Docker Containers:"
 		docker ps --format json | jq '[.State, .Names] | @tsv' -r
 
 
@@ -75,24 +76,26 @@ switch $argv[1]
 					read _ignore file_path
 
 					echo "Processing photo..."
-					echo "//send"
+					echo "//edit"
 					magick $file_path -fill blue -colorize 50% $file_path
 
+					echo "Uploading photo..."
+					echo "//edit"
 					echo "//send-photo $file_path"
-					echo "Done!"
-					echo "//send"
+					echo "//delete"
 					set done true
 
-				case 'stop'
+				case '/stop'
 					echo "Ok!"
+					echo "//send"
 					set done true
 
 				case '//tg-photo'
-					echo 'Oops, you uploaded a photo! Photos are compressed by telegram, for best results please send the picture as a file. (Or send "stop" to stop.)'
+					echo 'Oops, you uploaded a photo! Photos are compressed by telegram, for best results please send the picture as a file. (Or send /stop to stop.)'
 					echo "//send"
 
 				case '*'
-					echo 'I was expecting a file upload, please try again. (Or send "stop" to stop)'
+					echo 'I was expecting a file upload, please try again. (Or send /stop to stop)'
 					echo "//send"
 			end
 		end
@@ -128,12 +131,23 @@ switch $argv[1]
 	# Send the user the favicon and current player count of an active minecraft server
 	# Try mc.hypixel.net
 	case "/mc"
-		echo "Ready for the Server Address!"
+		echo "Send a server address or tap one of the servers below!"
+		echo "//inline-button callback mc.hypixel.net Hypixel"
+		echo "//inline-button callback us.mineplex.com Mineplex"
 		echo "//send"
 
-		read server_address
-		set server_address (string trim $server_address)
-		set server_data (curl "https://api.mcsrvstat.us/2/$server_address")
+		read --array response
+
+		echo "Getting server status..."
+		echo "//edit"
+
+		if test "//tg-callback" = "$response[1]"
+			set server_url "$response[2]"
+		else
+			set server_url "$response[1]"
+		end
+
+		set server_data (curl "https://api.mcsrvstat.us/2/$server_url")
 
 		# Message the current and max player counts
 		echo -e "Players: $(echo $server_data | jq .players.online)\nMax: $(echo $server_data | jq .players.max)"
