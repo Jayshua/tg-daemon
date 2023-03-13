@@ -25,6 +25,20 @@ switch $argv[1]
 		echo "Hello, World!"
 
 
+	# Attach a photo
+	case "/photo"
+		echo "Sending a photo, this one is from Krystal Ng on Unsplash!"
+		echo "//send"
+		echo "//send-photo ./examples/krystal-ng-PrQqQVPzmlw-unsplash.jpg"
+
+
+	# Attach a file
+	case "/file"
+		echo "Sending a file!"
+		echo "//send"
+		echo "//send-file ./examples/file.txt"
+
+
 	# Do some math using fish's builtin math function
 	case "/math"
 		echo "Send some math!"
@@ -70,6 +84,8 @@ switch $argv[1]
 
 			switch $argv[1]
 				case '//tg-document'
+					set done true
+
 					echo "Receiving photo..."
 					echo "//send"
 					echo "//download-file $_flag_file_id"
@@ -83,12 +99,11 @@ switch $argv[1]
 					echo "//edit"
 					echo "//send-photo $file_path"
 					echo "//delete"
-					set done true
 
 				case '/stop'
+					set done true
 					echo "Ok!"
 					echo "//send"
-					set done true
 
 				case '//tg-photo'
 					echo 'Oops, you uploaded a photo! Photos are compressed by telegram, for best results please send the picture as a file. (Or send /stop to stop.)'
@@ -117,7 +132,7 @@ switch $argv[1]
 		echo "Ready for URL! 😊"
 		echo "//send"
 
-		read url
+		read -a url # Reading the url into an array with -a strips the trailing
 
 		echo "Downloading $url. ✨"
 		echo "//send"
@@ -138,8 +153,8 @@ switch $argv[1]
 
 		read --array response
 
-		echo "Getting server status..."
-		echo "//edit"
+		echo "//remove-inline-keyboard"
+		echo "//chat-action typing"
 
 		if test "//tg-callback" = "$response[1]"
 			set server_url "$response[2]"

@@ -1,4 +1,3 @@
-search    Do a search
 hello     Greeting!
 dps       Report any running docker containers
 dl        Download a file from the internet
@@ -7,3 +6,5 @@ colorize  Apply a blue overlay to a photo
 mc        Check the status of a minecraft server
 anime     Report the soonest upcoming anime
 math      Do some math
+photo     Send a photo
+file      Send a file attachment

@@ -6,26 +6,25 @@ A daemon that will connect to Telegram as a bot and forward chat messages to ano
 ## Getting Started
 
 1. Get the code  
-	Clone the repo and run `cargo build --release`, then copy `target/release/tg-daemon` to your bin directory.
+	Clone the repo and run `cargo build --release`, then copy `target/release/tg-daemon` to the bin directory your distribution provides for manually installed executables. (Usually /usr/local/bin)
 
 2. Get a Telegram Bot ID  
-	Message the BotFather in the Telegram app. https://telegram.me/BotFather  
-	You should just need to send it the `/newbot` command.
+	Message `/newbot` to the BotFather in the Telegram app. BotFather will walk you through the setup process.  
+	https://telegram.me/BotFather
 
-3. Write an executable for tg-daemon to run when your bot receives a message.  
-	Or copy one of the example scripts from the examples directory.
+3. Write an executable for tg-daemon to run when your bot receives a message, or copy one of the example scripts from the examples directory. See the "How to write a handler executable" section below.
 
-4. Run with a command like: `tg-daemon --executable script.sh --bot-id slkfjlaksdfjlskfjlskdf`  
+4. Run tg-daemon with a command like: `tg-daemon --executable script.sh --bot-id slkfjlaksdfjlskfjlskdf`, or run `tg-daemon --help` for more options.
 
-5. Lockdown tg-daemon to only respond to your personal chat messages (Optional, but **strongly** recommended. See the Caveats section below.)  
+5. (Optional) Lockdown tg-daemon to only respond to your personal chat messages (Optional, but **strongly** recommended. See the Caveats section below.)  
 	You can find your chat_id by setting the LOG_LEVEL environment variable to "INFO" and looking at tg-daemon's logs, or echoing the CHAT_ID environment variable in your handler script.
 
-6. Run tg-daemon as a service  
+6. (Optional) Run tg-daemon as a daemon/service  
 	You'll have to consult your Linux distribution's documentation for this one.  
-	In Void Linux you would create a service directory and link it in /var/service.
+	In Void Linux you would create a service directory and link it with `ln` in the /var/service directory.
 
 
-## How to write a handler executable
+## How to write a handler script
 
 Handlers just need to be an executable that can read/write to stdin/stdout. I usually use Fish or Bash, but any language will work. I'll use Bash in these examples.
 
@@ -41,7 +40,7 @@ This is one of the simplest possible handler scripts:
 echo "Hello, World!"
 ```
 
-This will respond to every message with the text "Hello, World!".
+That script will respond to every message with the text "Hello, World!". A truly classic and stylish greeting.
 
 You can send multiple messages with the `//send` command:
 
@@ -57,7 +56,7 @@ echo "First Line"
 echo "Second Line"
 echo "//send"
 
-# The final //send is optional
+# The last //send is optional, any echoed but unset text after the script terminates will be sent automatically.
 echo "This message will be sent after the script terminates."
 ```
 
@@ -88,6 +87,7 @@ You can set the bot's status (the "typing..." or "uploading..." text that appear
 
 ```bash
 echo "Hello"
+echo "//send"
 echo "//chat-action typing"
 sleep 4
 echo "World!"
@@ -97,6 +97,7 @@ Command parsing can be suppressed with `//heredoc` until an arbitrary terminator
 
 ```bash
 echo "Message 42"
+echo "//send"
 echo "//delete" > /tmp/command.txt
 echo "//heredoc END_HEREDOC"
 cat /tmp/command.txt # This would delete Message 42 if not inside a heredoc
@@ -106,8 +107,9 @@ echo "END_HEREDOC"
 You can send a file with the `//send-file` command:
 
 ```bash
-echo "content for the example text file" > example.txt
-echo "//send-file ./example.txt"
+# Remember: the working directory will be the directory tg-daemon is run in, not the directory of the script.
+echo "content for the example text file" > ./asdf.txt
+echo "//send-file ./asdf.txt"
 ```
 
 You can send a photo with the `//send-photo` command:
@@ -150,6 +152,7 @@ tg-daemon will send you commands, which I call "callbacks", to let you know when
 
 ```bash
 echo "Please send me a photo"
+echo "//send"
 
 read -a response # The -a flag splits the read text into an array on whitespace (Sort of. Consult the bash documentation for more info.) 
 
@@ -183,7 +186,7 @@ echo "//inline-button callback standard-greeting With Standard Greeting"
 echo "//inline-button callback jedi-greeting With A Jedi Greeting"
 
 # This button will cause the user's telegram client to open their web browser when tapped
-echo "//inline-button url https://google.com/?q=what+is+a+greeting What is a Greeting?"
+echo "//inline-button url https://google.com/search?q=what+is+a+greeting What is a Greeting?"
 
 # Buttons are queued up into a list and attached to the next sent message
 echo "//send"
@@ -205,7 +208,6 @@ if [[ ${response[0]} = '//tg-callback' ]]; then
 			;;
 	esac
 fi
-
 ```
 
 `//inline-button url` buttons do not generate `//tg-callback` when tapped.
@@ -222,6 +224,20 @@ read -a response
 
 echo "//remove-inline-keyboard" # You probably want to make sure ${response} is a //tg-callback first.
 ```
+
+A separate instance of the handler script is spawned for each chat the bot is part of. You can access the unique id of the chat (provided by telegram) in the CHAT_ID environment variable:
+
+```bash
+echo "$CHAT_ID"
+```
+
+You can restrict tg-daemon to only accept messages from authorized chats with the --chat-id flag, which can be used multiple times:
+
+```bash
+tg-daemon --execute ./example.sh --bot-id <bot-id> --chat-id 1231231234 --chat-id 4564564567
+```
+
+tg-daemon will send "Unauthorized" to unauthorized chats, and will not spawn an instance of the handler script.
 
 That's all the basics! There are a few more details you can find in the reference documentation below. Checkout the examples directory for some more complex handler scripts.
 
@@ -255,9 +271,9 @@ Path should point to a file containing a command-description space separated pai
 Telegram will use the list to generate a "Menu" button in the app. Run tg-daemon with "--help"
 for more detail, or look in the examples folder for an example of the expected file format.
 
-**--supress-handler-error**  
-Suppress the "Fatal Server Error" message that tg-daemon sends if your
-handler executable exits with a non-zero status code.
+**--send-handler-errors**  
+Send details of handler process crashes to the Telegram chat in
+addition to the normal "Fatal Server Error" message.
 
 **--tg-api-url**  
 URL to access the Telegram API at.

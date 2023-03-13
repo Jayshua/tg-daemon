@@ -41,8 +41,8 @@ const TG_TIMEOUT: u64 = 300;
 #[command(author, version, about, long_about = None)]
 struct Args {
 	/// Path to the executable to spawn and send messages to
-	#[arg(short, long)]
-	execute: String,
+	#[arg(short, long, value_parser=validate_execute_path)]
+	execute: std::path::PathBuf,
 
 
 	/// ID of the telegram bot to listen for messages to.
@@ -60,14 +60,12 @@ struct Args {
 	chat_id: Vec<u64>,
 
 
-	/// Suppress chat message upon handler failure
+	/// Send details of handler crashes to the Telegram chat
 	///
-	/// By default, the daemon will send a notification error message to the telegram chat
-	/// if the handler process terminates with a non-zero status code.
-	/// Setting this to false will cause the daemon to not send a message if the handler process
-	/// terminates with a non-zero status code.
+	/// By default, details about a handler crash will only be logged to the console.
+	/// Turn this flag on to also send them to the Telegram chat.
 	#[arg(long)]
-	suppress_handler_error: bool,
+	send_handler_errors: bool,
 
 
 	/// Base URL to access the Telegram API at.
@@ -303,6 +301,7 @@ async fn chat_handler(tg: TgClient, config: Args, chat_id: u64, mut receiver: to
 		.args(args)
 		.stdout(std::process::Stdio::piped())
 		.stdin(std::process::Stdio::piped())
+		.env("CHAT_ID", chat_id.to_string())
 		.spawn();
 
 	let mut child = match child {
@@ -480,32 +479,40 @@ async fn chat_handler(tg: TgClient, config: Args, chat_id: u64, mut receiver: to
 	} };
 
 
-	match process_result {
+	let crash_result: Result<(), TgRequestError> = try { match process_result {
 		Ok(exit_status) if exit_status.success() => {
 			info!("Handler process ended successfully");
 
 			if message_buffer.len() > 0 && message_buffer != "\n" {
 				debug!("Sending remainder of handler process stdout");
-
-				if let Err(reason) = send_message(tg, chat_id, None, Some(&message_buffer), &next_message_keyboard).await {
-					error!(?reason, "Error sending remainder of handler process stdout");
-				}
+				send_message(tg, chat_id, None, Some(&message_buffer), &next_message_keyboard).await?;
 			}
 		}
 
 		Ok(exit_status) => {
 			error!(?exit_status, "Handler process terminated abnormally");
+			send_message(tg.clone(), chat_id, None, Some("Fatal Server Error"), &next_message_keyboard).await?;
 
-			if !config.suppress_handler_error {
-				if let Err(reason) = send_message(tg, chat_id, None, Some("Fatal Server Error"), &next_message_keyboard).await {
-					error!(?reason, "Error sending crash notification to telegram client");
-				}
+			if config.send_handler_errors {
+				let message = format!("{}", exit_status);
+				send_message(tg.clone(), chat_id, None, Some(message), &next_message_keyboard).await?;
 			}
 		}
 
 		Err(reason) => {
 			error!(?reason, "Fatal error");
+			send_message(tg.clone(), chat_id, None, Some("Fatal Server Error"), &next_message_keyboard).await?;
+
+			if config.send_handler_errors {
+				let message = format!("{:?}", reason);
+				send_message(tg.clone(), chat_id, None, Some(message), &[]).await?;
+			}
 		}
+	} };
+
+
+	if let Err(reason) = crash_result {
+		error!(?reason, "Error sending crash notification to telegram client");
 	}
 }
 
@@ -683,4 +690,24 @@ fn clean_file_name(input: &str) -> String {
 		.chars()
 		.filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
 		.collect::<String>()
+}
+
+
+/// Parse the path provided to the --execute param, validating a few basic requirements
+fn validate_execute_path(path: &str) -> Result<std::path::PathBuf, String> {
+	let path = std::fs::canonicalize(std::path::PathBuf::from(path)).map_err(|x| x.to_string())?;
+
+	match std::fs::metadata(&path) {
+		Err(reason) => {
+			Err(format!("{}", reason))
+		}
+
+		Ok(metadata) => {
+			if !metadata.is_file() {
+				Err("is not a file".into())
+			} else {
+				Ok(path)
+			}
+		}
+	}
 }

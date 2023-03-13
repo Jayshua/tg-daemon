@@ -31,6 +31,17 @@ case $1 in
 		echo "Hello, World!"
 		;;
 
+	'/photo')
+		echo "Sending a photo, this one is from Krystal Ng on Unsplash!"
+		echo "//send"
+		echo "//send-photo ./examples/krystal-ng-PrQqQVPzmlw-unsplash.jpg"
+		;;
+
+	'/file')
+		echo "Sending a file!"
+		echo "//send"
+		echo "//send-file ./examples/file.txt"
+		;;
 
 	# Show error for unimplemented command
 	'/math')
@@ -40,6 +51,7 @@ case $1 in
 
 	# Report the status of any running docker containers
 	'/dps')
+		echo "Active Docker Containers:"
 		docker ps --format json | jq '[.State, .Names] | @tsv' -r
 		;;
 
@@ -73,13 +85,14 @@ case $1 in
 			read -a response
 
 			case "${response[0]}" in
-				'stop')
+				'/stop')
 					done=true
 					echo "Ok!"
+					echo "//send"
 					;;
 
 				'//tg-photo')
-					echo 'Oops, you uploaded a photo! Photos are compressed by telegram, for best results please send the picture as a file. (Or send "stop" to stop.)'
+					echo 'Oops, you uploaded a photo! Photos are compressed by telegram, for best results please send the picture as a file. (Or send /stop to stop.)'
 					echo "//send"
 					;;
 
@@ -100,12 +113,13 @@ case $1 in
 					read _ignored file_path
 
 					echo "Processing photo..."
-					echo "//send"
+					echo "//edit"
 					magick $file_path -fill blue -colorize 50% $file_path
 
+					echo "Uploading photo..."
+					echo "//edit"
 					echo "//send-photo $file_path"
-					echo "Done!"
-					echo "//send"
+					echo "//delete"
 					;;
 
 				*)
@@ -146,11 +160,23 @@ case $1 in
 	# Send the user the favicon and current player count of an active minecraft server
 	# Try mc.hypixel.net
 	'/mc')
-		echo "Ready for the Server Address!"
+		echo "Send a server address or tap one of the servers below!"
+		echo "//inline-button callback mc.hypixel.net Hypixel"
+		echo "//inline-button callback us.mineplex.com Mineplex"
 		echo "//send"
 
-		read server_address
-		server_data=$(curl "https://api.mcsrvstat.us/2/$server_address")
+		read -a response
+
+		echo "//remove-inline-keyboard"
+		echo "//chat-action typing"
+
+		if test "//tg-callback" = "${response[0]}"; then
+			server_url="${response[1]}"
+		else
+			server_url="${response[0]}"
+		fi
+
+		server_data=$(curl "https://api.mcsrvstat.us/2/$server_url")
 
 		# Message the current and max player counts
 		echo -e "Players: $(echo $server_data | jq .players.online)\nMax: $(echo $server_data | jq .players.max)"
