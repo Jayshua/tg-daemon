@@ -26,7 +26,7 @@ A daemon that will connect to Telegram as a bot and forward chat messages to ano
 
 ## How to write a handler script
 
-Handlers just need to be an executable that can read/write to stdin/stdout. I usually use Fish or Bash, but any language will work. I'll use Bash in these examples.
+Handlers just need to be an executable that can read/write to stdin/stdout. I usually use Fish or Bash, but any language will work. I'll use Bash in these examples. tg-daemon will spawn an instance of your script when a message is received from telegram. Subsequent messages will be forwarded over stdin until your script terminates.
 
 This is one of the simplest possible handler scripts:
 
@@ -100,7 +100,7 @@ echo "Message 42"
 echo "//send"
 echo "//delete" > /tmp/command.txt
 echo "//heredoc END_HEREDOC"
-cat /tmp/command.txt # This would delete Message 42 if not inside a heredoc
+cat /tmp/command.txt # This would delete Message 42 if not inside a heredoc. Instead it sends the literal text "//delete" as a message.
 echo "END_HEREDOC"
 ```
 
